@@ -6,15 +6,34 @@
 - Notionワークスペースへのアクセス権限
 - Googleアカウント（GAS実行のため）
 
+## アーキテクチャ
+
+Push型（Events API）を採用。SlackからGASにリアルタイムでメッセージが届く仕組み。
+
+```
+Slackチャンネルに投稿
+    ↓
+Slack Events API が GAS の URL に POST
+    ↓
+GAS doPost() でメッセージ受信
+    ↓
+URL検出 & 社内URL除外
+    ↓
+Notion保存
+```
+
+ポーリング方式と異なり、メッセージが投稿された時だけ処理するため、
+重複登録のリスクが構造的に排除される。
+
 ## セットアップフロー
 
 ```
-1. Slack App作成 → Bot Token取得
+1. Slack App作成
 2. Notion Integration作成 → Token取得
 3. Notionデータベース作成 → Integration接続
-4. GASプロジェクト作成 → コード配置
+4. GASプロジェクト作成 → コード配置 → デプロイ
 5. 環境変数設定
-6. トリガー作成
+6. Slack Events API にGASのURLを登録
 7. 動作確認
 ```
 
@@ -31,20 +50,17 @@
 5. Workspace: 対象のワークスペースを選択
 6. **Create App** をクリック
 
-### 1-2. Bot Token Scopesを追加
+### 1-2. Signing Secretを取得
 
-1. 左メニュー **OAuth & Permissions** をクリック
-2. **Scopes** セクションの **Bot Token Scopes** に以下を追加:
-   - `channels:history` - チャンネルのメッセージ履歴を読む
-   - `channels:read` - チャンネル情報を読む
+1. **Basic Information** ページ
+2. **App Credentials** セクション
+3. **Signing Secret** の値をコピーして保存
 
 ### 1-3. Workspaceにインストール
 
-1. **OAuth & Permissions** ページの上部
+1. 左メニュー **OAuth & Permissions** をクリック
 2. **Install to Workspace** をクリック
 3. 権限を確認して **許可する** をクリック
-4. **Bot User OAuth Token** が表示される（`xoxb-...` で始まる）
-5. このトークンをコピーして保存
 
 ### 1-4. チャンネルにBotを追加
 
@@ -56,7 +72,8 @@
 
 1. 対象チャンネルを開く
 2. チャンネル名をクリック
-3. 下部の **その他** → **チャンネルの詳細をコピー** → **ID** 欄の値をコピー（`C...` で始まる）
+3. 下部にチャンネルIDが表示される（`C...` で始まる）
+4. コピーして保存
 
 ---
 
@@ -119,7 +136,7 @@
 
 ---
 
-## 4. GASプロジェクト作成
+## 4. GASプロジェクト作成 & デプロイ
 
 ### 4-1. プロジェクトを作成
 
@@ -134,89 +151,127 @@
 3. [`src/Code.gs`](../src/Code.gs) の内容を全てコピー&ペースト
 4. **Ctrl+S** で保存
 
+### 4-3. Webアプリとしてデプロイ
+
+1. GASエディタ上部 **デプロイ** → **新しいデプロイ**
+2. 左上の歯車アイコン → **ウェブアプリ** を選択
+3. 設定:
+   - 説明: `Slack to Notion Knowledge Bot`
+   - 次のユーザーとして実行: **自分**
+   - アクセスできるユーザー: **全員**
+4. **デプロイ** をクリック
+5. 初回は権限の承認が必要:
+   - **アクセスを承認** → Googleアカウントを選択
+   - **詳細** → **Slack to Notion（安全ではないページ）に移動** → **許可**
+6. **ウェブアプリのURL** が表示される
+   - `https://script.google.com/macros/s/{DEPLOYMENT_ID}/exec`
+   - このURLをコピーして保存（Slack設定で使用）
+
 ---
 
 ## 5. 環境変数設定
 
-### 方法A: 対話的に設定（推奨）
+### コードで直接設定
 
-1. GASエディタで `setup` 関数を選択
-2. **実行** ボタンをクリック
-3. 初回実行時、権限の承認を求められる:
-   - **権限を確認** → Googleアカウントを選択
-   - **詳細** → **Slack to Notion（安全ではないページ）に移動** をクリック
-   - **許可** をクリック
-4. プロンプトに従って以下を入力:
-   - Slack Bot Token（`xoxb-...`）
-   - Notion Token（`secret_...`）
-   - Notion Database ID
-   - Slack Channel ID（`C...`）
-   - Slack Workspace名（例: `yourworkspace`）
-
-### 方法B: コードで直接設定
-
-1. `setupDirect` 関数内の値を編集:
+1. GASエディタで `setupDirect` 関数内の値を編集:
    ```javascript
-   props.setProperty('SLACK_BOT_TOKEN', 'xoxb-your-actual-token');
    props.setProperty('NOTION_TOKEN', 'secret_your-actual-token');
    props.setProperty('NOTION_DATABASE_ID', 'your-actual-database-id');
    props.setProperty('SLACK_CHANNEL_ID', 'C1234567890');
    props.setProperty('SLACK_WORKSPACE', 'yourworkspace');
+   props.setProperty('SLACK_SIGNING_SECRET', 'your-slack-signing-secret');
    ```
-2. `setupDirect` 関数を実行
+2. `setupDirect` 関数を選択して **実行**
+3. 実行ログに「設定完了」と表示されることを確認
 
 ---
 
-## 6. トリガー作成
+## 6. Slack Events API にGASのURLを登録
 
-### 6-1. トリガーを作成
+### 6-1. Event Subscriptionsを有効化
 
-1. GASエディタで `createTrigger` 関数を選択
-2. **実行** ボタンをクリック
-3. 実行ログに「トリガー作成完了（1分間隔）」と表示されることを確認
+1. https://api.slack.com/apps → 作成したAppを選択
+2. 左メニュー **Event Subscriptions** をクリック
+3. **Enable Events** を **On** に切り替え
 
-### 6-2. トリガーを確認
+### 6-2. Request URLを設定
 
-1. 左メニュー **トリガー** アイコン（時計マーク）をクリック
-2. `processSlackMessages` 関数が1分間隔で実行されることを確認
+1. **Request URL** 欄にGASのWebアプリURLを貼り付け:
+   - `https://script.google.com/macros/s/{DEPLOYMENT_ID}/exec`
+2. Slackが自動的にURL Verificationリクエストを送信
+3. **Verified** と表示されれば成功
+
+### 6-3. Subscribe to bot eventsを追加
+
+1. **Subscribe to bot events** セクションを展開
+2. **Add Bot User Event** をクリック
+3. `message.channels` を追加（パブリックチャンネルのメッセージ）
+4. **Save Changes** をクリック
+
+### 6-4. Appを再インストール
+
+1. 左メニュー **OAuth & Permissions** に移動
+2. **Reinstall to Workspace** をクリック
+3. 権限を確認して **許可する**
 
 ---
 
 ## 7. 動作確認
 
-### 7-1. テスト実行
+### 7-1. テスト実行（サンプルイベント）
 
-1. GASエディタで `testRun` 関数を選択
+1. GASエディタで `testWithSampleEvent` 関数を選択
 2. **実行** ボタンをクリック
 3. 実行ログを確認:
-   - エラーがないか確認
-   - 「新規メッセージなし」または「X件の新規メッセージを処理」と表示されることを確認
+   - 「Notion保存成功」と表示されれば成功
+   - Notionデータベースにテストデータが追加されていることを確認
 
 ### 7-2. 実際の動作確認
 
 1. Slackの対象チャンネルにURL含む投稿をする
    - 例: `これ便利そう https://example.com`
-2. 1〜2分待つ（トリガーが実行されるまで）
+2. 数秒〜10秒程度で（ポーリングではないのでほぼリアルタイム）
 3. Notionデータベースに新しいページが作成されていることを確認
 
 ### 7-3. 社内URL除外の確認
 
-1. Slackに社内URL含む投稿をする
-   - 例: `社内Jira https://jira.yourcompany.com/browse/PROJECT-123`
-2. 1〜2分待つ
-3. Notionに保存されないことを確認
+1. Slackに社内URLのみの投稿をする
+   - 例: `社内Wiki https://192.168.1.100/wiki`
+2. Notionに保存**されない**ことを確認
+
+### 7-4. 社内URLパターンのテスト
+
+1. GASエディタで `testInternalPatterns` 関数を実行
+2. ログで各URLの判定結果を確認
 
 ---
 
 ## トラブルシューティング
 
-### エラー: `Slack API error: invalid_auth`
+### URL Verificationが失敗する
 
-**原因**: Slack Bot Tokenが間違っている
+**原因**: GASがデプロイされていない、またはURLが間違っている
 
 **対処**:
-1. Slack Appの **OAuth & Permissions** でBot User OAuth Tokenを再確認
-2. `setupDirect` 関数で正しいトークンを設定し直す
+1. GASエディタ → **デプロイ** → **デプロイを管理** でURLを確認
+2. 「アクセスできるユーザー: 全員」になっているか確認
+3. URLをブラウザで開いて何らかのレスポンスが返るか確認
+
+### メッセージがNotionに保存されない
+
+**確認手順**:
+1. GASエディタの **実行数** タブでログを確認
+2. `doPost` が呼ばれているかチェック
+
+**考えられる原因**:
+
+| 原因 | 対処 |
+|------|------|
+| Events APIの設定が間違っている | `message.channels` が登録されているか確認 |
+| BotがチャンネルにInviteされていない | チャンネルのインテグレーションで追加 |
+| URL含まない投稿 | テキストのみの投稿は対象外 |
+| 社内URLのみ | 社内URLパターンに一致するURLのみの投稿は対象外 |
+| SLACK_CHANNEL_IDが間違っている | `setupDirect` で正しいIDを設定 |
 
 ### エラー: `Notion API error: unauthorized`
 
@@ -235,17 +290,13 @@
 2. コード内の `properties` オブジェクトのキー名と一致させる
    - 大文字・小文字の違いに注意
 
-### メッセージがNotionに保存されない
+### 重複リトライ
 
-**考えられる原因**:
+**原因**: GASの処理が3秒以上かかり、Slackがリトライしている
 
-1. **URL含まない投稿**: テキストのみの投稿は保存されない
-2. **社内URLのみ**: 社内URLパターンに一致するURLのみの投稿は保存されない
-3. **トリガー未起動**: `createTrigger` 関数を実行していない
+**確認**: ログに「リトライ検出」「重複イベント検出」が出ていれば正常に防止できている
 
-**確認手順**:
-1. GASエディタの **実行数** タブでログを確認
-2. `testRun` 関数を手動実行してログを確認
+**対処**: 特に不要（コード側で自動的にスキップしている）
 
 ### 実行ログの確認方法
 
@@ -255,54 +306,26 @@
 
 ---
 
-## 社内URLパターンのカスタマイズ
+## コードを更新した場合の再デプロイ
 
-### パターンの追加
+GASのコードを修正した場合、Webアプリを再デプロイする必要があります。
 
-`Code.gs` の `INTERNAL_PATTERNS` 配列に正規表現を追加:
+1. GASエディタ → **デプロイ** → **デプロイを管理**
+2. 既存のデプロイの右上の鉛筆アイコンをクリック
+3. **バージョン** → **新バージョン** を選択
+4. **デプロイ** をクリック
 
-```javascript
-const INTERNAL_PATTERNS = [
-  // 既存パターン...
-
-  // 社内ツール例
-  /https?:\/\/jira\.yourcompany\.com/,
-  /https?:\/\/confluence\.yourcompany\.com/,
-  /https?:\/\/github\.yourcompany\.com/,
-  /https?:\/\/.*\.yourcompany\.internal/,
-];
-```
-
-### パターンのテスト
-
-1. GASエディタで以下を追加:
-   ```javascript
-   function testInternalPattern() {
-     const testUrls = [
-       'https://jira.yourcompany.com/browse/PROJECT-123',
-       'https://example.com',
-       'https://192.168.1.1',
-     ];
-
-     testUrls.forEach(url => {
-       const isInternal = isInternalUrl(url);
-       Logger.log(`${url}: ${isInternal ? '社内URL' : '外部URL'}`);
-     });
-   }
-   ```
-2. `testInternalPattern` 関数を実行
-3. ログで判定結果を確認
-
-詳細は [INTERNAL_PATTERNS.md](./INTERNAL_PATTERNS.md) を参照。
+URLは変わりません。Slackの設定を変更する必要はありません。
 
 ---
 
 ## メンテナンス
 
-### トリガーの停止
+### 一時停止
 
-1. GASエディタで `deleteTrigger` 関数を実行
-2. または、左メニュー **トリガー** から手動で削除
+Events APIを無効化:
+1. https://api.slack.com/apps → App選択
+2. **Event Subscriptions** → **Enable Events** を **Off**
 
 ### 環境変数の更新
 
@@ -315,11 +338,9 @@ GASの実行ログは自動的に削除されるため、手動クリーンア�
 
 ---
 
-## 次のステップ
+## 社内URLパターンのカスタマイズ
 
-- [社内URLパターンのカスタマイズ](./INTERNAL_PATTERNS.md)
-- Notionデータベースでのカテゴリ・タグ分類
-- 定期的なレビューと整理
+詳細は [INTERNAL_PATTERNS.md](./INTERNAL_PATTERNS.md) を参照。
 
 ---
 

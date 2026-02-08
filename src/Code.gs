@@ -1,18 +1,23 @@
 // Slack to Notion Knowledge Base
-// Google Apps Script (GAS) implementation
+// Google Apps Script (GAS) implementation — Push型（Events API）
 //
-// このスクリプトは、Slackチャンネルの新規メッセージを監視し、
-// URL含む投稿を自動的にNotionデータベースに保存します。
+// Slackチャンネルに投稿されたURL含むメッセージを、
+// Slack Events API経由でリアルタイムに受信し、Notionデータベースに保存する。
+//
+// ポーリング方式と異なり、Slackからメッセージが来た時だけ処理するため、
+// 重複登録のリスクが構造的に排除される。
 
 // === 設定 ===
-const CONFIG = {
-  SLACK_BOT_TOKEN: PropertiesService.getScriptProperties().getProperty('SLACK_BOT_TOKEN'),
-  NOTION_TOKEN: PropertiesService.getScriptProperties().getProperty('NOTION_TOKEN'),
-  NOTION_DATABASE_ID: PropertiesService.getScriptProperties().getProperty('NOTION_DATABASE_ID'),
-  SLACK_CHANNEL_ID: PropertiesService.getScriptProperties().getProperty('SLACK_CHANNEL_ID'),
-  SLACK_WORKSPACE: PropertiesService.getScriptProperties().getProperty('SLACK_WORKSPACE'), // 例: yourworkspace
-  LAST_PROCESSED_TS: 'LAST_PROCESSED_TS', // プロパティキー
-};
+function getConfig() {
+  const props = PropertiesService.getScriptProperties();
+  return {
+    NOTION_TOKEN: props.getProperty('NOTION_TOKEN'),
+    NOTION_DATABASE_ID: props.getProperty('NOTION_DATABASE_ID'),
+    SLACK_CHANNEL_ID: props.getProperty('SLACK_CHANNEL_ID'),
+    SLACK_WORKSPACE: props.getProperty('SLACK_WORKSPACE'),
+    SLACK_SIGNING_SECRET: props.getProperty('SLACK_SIGNING_SECRET'),
+  };
+}
 
 // === 社内URL除外パターン ===
 // 以下のパターンに一致するURLは、Notionに保存されません
@@ -35,91 +40,88 @@ const INTERNAL_PATTERNS = [
   // /https?:\/\/github\.yourcompany\.com/,
 ];
 
-// === メイン処理（トリガーで1分間隔実行） ===
-function processSlackMessages() {
+// === Slack Events API エントリポイント ===
+// GASをWebアプリとしてデプロイすると、このURLにSlackからPOSTが来る
+function doPost(e) {
   try {
-    const lastTs = PropertiesService.getScriptProperties().getProperty(CONFIG.LAST_PROCESSED_TS) || '0';
+    const body = JSON.parse(e.postData.contents);
 
-    const messages = fetchNewMessages(lastTs);
-
-    if (messages.length === 0) {
-      Logger.log('新規メッセージなし');
-      return;
+    // 1. URL Verification（初回セットアップ時にSlackが送信）
+    if (body.type === 'url_verification') {
+      return ContentService.createTextOutput(body.challenge);
     }
 
-    Logger.log(`${messages.length}件の新規メッセージを処理`);
+    // 2. Slackのリトライを検出してスキップ
+    //    Slackは3秒以内にレスポンスがないとリトライする
+    const retryNum = e.parameter && e.parameter['X-Slack-Retry-Num'];
+    if (retryNum) {
+      Logger.log(`リトライ検出（${retryNum}回目）: スキップ`);
+      return ContentService.createTextOutput('ok');
+    }
 
-    let latestTs = lastTs;
-    let savedCount = 0;
-    let skippedCount = 0;
+    // 3. イベントコールバック処理
+    if (body.type === 'event_callback') {
+      const event = body.event;
 
-    messages.forEach(msg => {
-      if (parseFloat(msg.ts) > parseFloat(latestTs)) {
-        latestTs = msg.ts;
+      // event_idで重複チェック（CacheService: 最大6時間TTL、自動消滅）
+      const cache = CacheService.getScriptCache();
+      const eventId = body.event_id;
+
+      if (cache.get(eventId)) {
+        Logger.log(`重複イベント検出: ${eventId}`);
+        return ContentService.createTextOutput('ok');
       }
 
-      const text = msg.text || '';
-      const urls = extractUrls(text);
+      // 処理済みとしてキャッシュ（6時間保持）
+      cache.put(eventId, 'processed', 21600);
 
-      if (urls.length === 0) {
-        Logger.log(`スキップ（URL無し）: ${text.slice(0, 50)}`);
-        skippedCount++;
-        return;
+      // メッセージイベントのみ処理
+      if (event.type === 'message' && !event.subtype) {
+        processMessage(event);
       }
+    }
 
-      const externalUrls = urls.filter(url => !isInternalUrl(url));
-
-      if (externalUrls.length === 0) {
-        Logger.log(`スキップ（社内URLのみ）: ${urls.join(', ')}`);
-        skippedCount++;
-        return;
-      }
-
-      Logger.log(`Notion保存: ${externalUrls.join(', ')}`);
-      saveToNotion(msg, externalUrls);
-      savedCount++;
-    });
-
-    PropertiesService.getScriptProperties().setProperty(CONFIG.LAST_PROCESSED_TS, latestTs);
-    Logger.log(`処理完了: ${savedCount}件保存, ${skippedCount}件スキップ, 最終TS: ${latestTs}`);
+    return ContentService.createTextOutput('ok');
 
   } catch (error) {
-    Logger.log(`エラー発生: ${error.message}`);
+    Logger.log(`doPost エラー: ${error.message}`);
     Logger.log(error.stack);
-    throw error;
+    // エラーでもSlackに200を返す（リトライ防止）
+    return ContentService.createTextOutput('ok');
   }
 }
 
-// === Slackメッセージ取得 ===
-function fetchNewMessages(afterTs) {
-  const url = 'https://slack.com/api/conversations.history';
-  const params = {
-    channel: CONFIG.SLACK_CHANNEL_ID,
-    oldest: afterTs,
-    limit: 100,
-  };
+// === メッセージ処理 ===
+function processMessage(event) {
+  const config = getConfig();
+  const text = event.text || '';
+  const channel = event.channel;
 
-  const queryString = Object.keys(params).map(k => `${k}=${encodeURIComponent(params[k])}`).join('&');
-
-  const options = {
-    method: 'get',
-    headers: {
-      'Authorization': `Bearer ${CONFIG.SLACK_BOT_TOKEN}`,
-    },
-    muteHttpExceptions: true,
-  };
-
-  const response = UrlFetchApp.fetch(`${url}?${queryString}`, options);
-  const data = JSON.parse(response.getContentText());
-
-  if (!data.ok) {
-    throw new Error(`Slack API error: ${data.error}`);
+  // 対象チャンネルのみ処理
+  if (config.SLACK_CHANNEL_ID && channel !== config.SLACK_CHANNEL_ID) {
+    Logger.log(`対象外チャンネル: ${channel}`);
+    return;
   }
 
-  // 通常のメッセージのみ（botメッセージ、編集、削除等を除外）
-  return data.messages
-    .filter(m => m.type === 'message' && !m.subtype)
-    .reverse(); // 古い順に処理
+  // URL抽出
+  const urls = extractUrls(text);
+
+  if (urls.length === 0) {
+    Logger.log(`スキップ（URL無し）: ${text.slice(0, 50)}`);
+    return;
+  }
+
+  // 社内URL除外
+  const externalUrls = urls.filter(url => !isInternalUrl(url));
+
+  if (externalUrls.length === 0) {
+    Logger.log(`スキップ（社内URLのみ）: ${urls.join(', ')}`);
+    return;
+  }
+
+  // Notion保存
+  Logger.log(`Notion保存: ${externalUrls.join(', ')}`);
+  saveToNotion(event, externalUrls, config);
 }
 
 // === URL抽出 ===
@@ -139,9 +141,8 @@ function extractUrls(text) {
   // 通常のURL
   const normalMatches = text.match(normalUrlRegex) || [];
   normalMatches.forEach(url => {
-    // 既に抽出済みでないか確認
     if (!urls.includes(url)) {
-      urls.push(url.replace(/[>).,;]$/, '')); // 末尾の記号除去
+      urls.push(url.replace(/[>).,;]$/, ''));
     }
   });
 
@@ -154,16 +155,16 @@ function isInternalUrl(url) {
 }
 
 // === Notion保存 ===
-function saveToNotion(message, urls) {
-  const text = message.text || '';
-  const ts = message.ts;
-  const channelId = CONFIG.SLACK_CHANNEL_ID;
-  const workspace = CONFIG.SLACK_WORKSPACE || 'workspace';
-  const slackLink = `https://${workspace}.slack.com/archives/${channelId}/p${ts.replace('.', '')}`;
+function saveToNotion(event, urls, config) {
+  const text = event.text || '';
+  const ts = event.ts;
+  const channel = event.channel;
+  const workspace = config.SLACK_WORKSPACE || 'workspace';
+  const slackLink = `https://${workspace}.slack.com/archives/${channel}/p${ts.replace('.', '')}`;
 
   const url = 'https://api.notion.com/v1/pages';
   const payload = {
-    parent: { database_id: CONFIG.NOTION_DATABASE_ID },
+    parent: { database_id: config.NOTION_DATABASE_ID },
     properties: {
       Name: {
         title: [
@@ -175,7 +176,7 @@ function saveToNotion(message, urls) {
       Content: {
         rich_text: [
           {
-            text: { content: text.slice(0, 2000) } // Notion制限: 2000文字
+            text: { content: text.slice(0, 2000) }
           }
         ]
       },
@@ -198,7 +199,7 @@ function saveToNotion(message, urls) {
   const options = {
     method: 'post',
     headers: {
-      'Authorization': `Bearer ${CONFIG.NOTION_TOKEN}`,
+      'Authorization': `Bearer ${config.NOTION_TOKEN}`,
       'Content-Type': 'application/json',
       'Notion-Version': '2022-06-28',
     },
@@ -217,91 +218,66 @@ function saveToNotion(message, urls) {
   Logger.log(`Notion保存成功: ${data.id}`);
 }
 
-// === 初期設定（最初に1回だけ実行） ===
-function setup() {
-  const ui = SpreadsheetApp.getUi(); // または DocumentApp.getUi()
-
-  // 環境変数を対話的に設定
-  const slackToken = ui.prompt('Slack Bot Token', 'xoxb-... を入力してください', ui.ButtonSet.OK_CANCEL);
-  if (slackToken.getSelectedButton() !== ui.Button.OK) return;
-
-  const notionToken = ui.prompt('Notion Token', 'secret_... を入力してください', ui.ButtonSet.OK_CANCEL);
-  if (notionToken.getSelectedButton() !== ui.Button.OK) return;
-
-  const databaseId = ui.prompt('Notion Database ID', 'データベースIDを入力してください', ui.ButtonSet.OK_CANCEL);
-  if (databaseId.getSelectedButton() !== ui.Button.OK) return;
-
-  const channelId = ui.prompt('Slack Channel ID', 'C... を入力してください', ui.ButtonSet.OK_CANCEL);
-  if (channelId.getSelectedButton() !== ui.Button.OK) return;
-
-  const workspace = ui.prompt('Slack Workspace', 'ワークスペース名を入力してください（例: yourworkspace）', ui.ButtonSet.OK_CANCEL);
-  if (workspace.getSelectedButton() !== ui.Button.OK) return;
-
-  const props = PropertiesService.getScriptProperties();
-  props.setProperty('SLACK_BOT_TOKEN', slackToken.getResponseText());
-  props.setProperty('NOTION_TOKEN', notionToken.getResponseText());
-  props.setProperty('NOTION_DATABASE_ID', databaseId.getResponseText());
-  props.setProperty('SLACK_CHANNEL_ID', channelId.getResponseText());
-  props.setProperty('SLACK_WORKSPACE', workspace.getResponseText());
-
-  // 初期タイムスタンプ（現在時刻）
-  props.setProperty('LAST_PROCESSED_TS', (Date.now() / 1000).toString());
-
-  ui.alert('設定完了', '環境変数を設定しました', ui.ButtonSet.OK);
-  Logger.log('設定完了');
-}
-
 // === 簡易設定（コードで直接設定する場合） ===
 function setupDirect() {
   const props = PropertiesService.getScriptProperties();
 
   // ↓ 実際の値に置き換えてください
-  props.setProperty('SLACK_BOT_TOKEN', 'xoxb-your-slack-bot-token');
   props.setProperty('NOTION_TOKEN', 'secret_your-notion-integration-token');
   props.setProperty('NOTION_DATABASE_ID', 'your-notion-database-id');
   props.setProperty('SLACK_CHANNEL_ID', 'C1234567890');
   props.setProperty('SLACK_WORKSPACE', 'yourworkspace');
-
-  // 初期タイムスタンプ（現在時刻）
-  props.setProperty('LAST_PROCESSED_TS', (Date.now() / 1000).toString());
+  props.setProperty('SLACK_SIGNING_SECRET', 'your-slack-signing-secret');
 
   Logger.log('設定完了');
 }
 
-// === トリガー設定（最初に1回だけ実行） ===
-function createTrigger() {
-  // 既存のトリガーを削除
-  const triggers = ScriptApp.getProjectTriggers();
-  triggers.forEach(trigger => {
-    if (trigger.getHandlerFunction() === 'processSlackMessages') {
-      ScriptApp.deleteTrigger(trigger);
-    }
-  });
-
-  // 新しいトリガーを作成（1分間隔）
-  ScriptApp.newTrigger('processSlackMessages')
-    .timeBased()
-    .everyMinutes(1)
-    .create();
-
-  Logger.log('トリガー作成完了（1分間隔）');
+// === デプロイURL確認 ===
+function showWebAppUrl() {
+  Logger.log('デプロイ後、以下のURLをSlack Events APIのRequest URLに設定してください:');
+  Logger.log('https://script.google.com/macros/s/{DEPLOYMENT_ID}/exec');
+  Logger.log('');
+  Logger.log('デプロイ手順:');
+  Logger.log('1. GASエディタ → デプロイ → 新しいデプロイ');
+  Logger.log('2. 種類: ウェブアプリ');
+  Logger.log('3. アクセスできるユーザー: 全員');
+  Logger.log('4. デプロイ → URLをコピー');
 }
 
-// === トリガー削除 ===
-function deleteTrigger() {
-  const triggers = ScriptApp.getProjectTriggers();
-  triggers.forEach(trigger => {
-    if (trigger.getHandlerFunction() === 'processSlackMessages') {
-      ScriptApp.deleteTrigger(trigger);
-      Logger.log('トリガー削除: ' + trigger.getUniqueId());
-    }
-  });
-  Logger.log('トリガー削除完了');
-}
-
-// === 手動テスト実行 ===
-function testRun() {
+// === 手動テスト（Events APIのシミュレーション） ===
+function testWithSampleEvent() {
   Logger.log('=== テスト実行開始 ===');
-  processSlackMessages();
+
+  // サンプルイベントを作成
+  const sampleEvent = {
+    type: 'message',
+    text: 'これ便利そう https://example.com/article 参考にしてね',
+    channel: getConfig().SLACK_CHANNEL_ID,
+    ts: (Date.now() / 1000).toString(),
+    user: 'U1234567890',
+  };
+
+  processMessage(sampleEvent);
+
   Logger.log('=== テスト実行完了 ===');
+}
+
+// === 社内URLパターンのテスト ===
+function testInternalPatterns() {
+  const testUrls = [
+    // 社内URL（除外されるべき）
+    'https://192.168.1.1',
+    'https://10.0.0.1/admin',
+    'https://localhost:3000',
+    'https://jira.internal/browse/PROJ-1',
+    // 外部URL（保存されるべき）
+    'https://example.com',
+    'https://github.com/user/repo',
+    'https://zenn.dev/articles/12345',
+  ];
+
+  testUrls.forEach(url => {
+    const isInternal = isInternalUrl(url);
+    Logger.log(`${isInternal ? '除外' : '保存'}: ${url}`);
+  });
 }
