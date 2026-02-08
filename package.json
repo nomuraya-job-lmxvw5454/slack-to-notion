@@ -1,0 +1,22 @@
+{
+  "name": "slack-to-notion",
+  "version": "1.0.0",
+  "description": "Slack→Notion自動転記ツール（GAS + Events API）",
+  "license": "MIT",
+  "scripts": {
+    "login": "clasp login",
+    "create": "clasp create --type webapp --title 'Slack to Notion' --rootDir src",
+    "push": "clasp push",
+    "deploy": "clasp push && clasp deploy -d 'Production'",
+    "open": "clasp open",
+    "logs": "clasp logs",
+    "setup": "clasp push && clasp run setupDirect"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nomuraya-job-lmxvw5454/slack-to-notion.git"
+  },
+  "devDependencies": {
+    "@google/clasp": "^3.2.0"
+  }
+}

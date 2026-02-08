@@ -31,39 +31,50 @@ Notionデータベースにページ作成
 - 無料 & 商用利用可能
 - 社内URLパターンで自動フィルタリング
 - ほぼリアルタイム（ポーリングではないため遅延なし）
-- Notionデータベースで後から分類・タグ付け可能
+- CLIでデプロイまで完結（clasp）
 
-## セットアップ
+## クイックスタート
+
+```bash
+git clone https://github.com/nomuraya-job-lmxvw5454/slack-to-notion.git
+cd slack-to-notion
+npm install
+
+npm run login    # Googleアカウントでログイン
+npm run create   # GASプロジェクト作成
+npm run deploy   # Webアプリとしてデプロイ
+```
 
 詳細は [docs/SETUP.md](./docs/SETUP.md) を参照。
 
-### クイックスタート
+## CLIコマンド
 
-1. Slack App作成 & Signing Secret取得
-2. Notion Integration作成 & Token取得
-3. Notionデータベース作成 & Integrationを接続
-4. GASプロジェクト作成 & コード配置 & Webアプリデプロイ
-5. 環境変数設定
-6. Slack Events APIにGASのURLを登録
+| コマンド | 用途 |
+|---------|------|
+| `npm run login` | Googleアカウントでログイン |
+| `npm run create` | GASプロジェクト作成 |
+| `npm run push` | コードをGASにアップロード |
+| `npm run deploy` | push + Webアプリデプロイ |
+| `npm run open` | GASエディタをブラウザで開く |
+| `npm run logs` | 実行ログを表示 |
 
 ## ディレクトリ構成
 
 ```
 slack-to-notion/
 ├── src/
-│   └── Code.gs              # GASメインコード（Events API対応）
+│   ├── Code.gs              # GASメインコード（Events API対応）
+│   └── appsscript.json      # GASマニフェスト
 ├── docs/
 │   ├── SETUP.md             # セットアップ手順
 │   └── INTERNAL_PATTERNS.md # 社内URLパターン設定
 ├── config/
 │   └── internal-patterns.example.js # 社内URLパターン例
+├── .clasp.json.example      # clasp設定例
+├── package.json
 └── README.md
 ```
 
 ## ライセンス
 
 MIT License
-
-## 作成者
-
-nomuraya

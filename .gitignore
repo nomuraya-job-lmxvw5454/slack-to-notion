@@ -1,4 +1,11 @@
-# Environment variables (if using local config files)
+# clasp (GASプロジェクト紐付け — scriptIdを含むため)
+.clasp.json
+
+# Node
+node_modules/
+package-lock.json
+
+# Environment variables
 config/internal-patterns.js
 .env
 .env.local
