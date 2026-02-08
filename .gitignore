@@ -1,0 +1,17 @@
+# Environment variables (if using local config files)
+config/internal-patterns.js
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
